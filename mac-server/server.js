@@ -1,112 +1,98 @@
 require('dotenv').config();
 const express = require('express');
-const WebSocket = require('ws');
-const cors = require('cors');
-const path = require('path');
+const cors    = require('cors');
+const path    = require('path');
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, '..', 'web_client', 'web')));
 
-let windowsClient  = null;
-let lastImage      = null;
-let lastAnalysis   = null;
-let analysisVersion = 0;   // يزيد كل مرة تتغير الإجابة
-let pendingCapture = null;
+// ── State ──
+let lastImage       = null;
+let lastAnalysis    = null;
+let analysisVersion = 0;
+let shouldCapture   = false;
+let pendingCapture  = null;
 
-const server = app.listen(3000, () => {
-    console.log('Server running on port 3000');
-});
-
-const wss = new WebSocket.Server({ server });
-
-wss.on('connection', (ws) => {
-    console.log('Windows connected');
-    windowsClient = ws;
-
-    ws.on('message', (data) => {
-        try {
-            const msg = JSON.parse(data);
-            if (msg.type === 'screenshot') {
-                console.log('Screenshot received');
-                lastImage = msg.image;
-                if (pendingCapture) {
-                    pendingCapture.json({ status: 'ok' });
-                    pendingCapture = null;
-                }
-            }
-        } catch (e) {
-            console.log('Error:', e.message);
-        }
-    });
-
-    ws.on('close', () => {
-        console.log('Windows disconnected');
-        windowsClient = null;
-    });
-});
-
-// iPhone: trigger screenshot
+// ── iPhone: trigger screenshot ──
 app.post('/capture', (req, res) => {
-    if (!windowsClient) {
-        return res.json({ status: 'error', message: 'Windows not connected' });
+  console.log('📱 /capture called');
+
+  if (pendingCapture) {
+    console.log('⚠️  Already pending, rejecting');
+    return res.json({ status: 'error', message: 'Busy' });
+  }
+
+  shouldCapture  = true;
+  pendingCapture = res;
+  console.log('✅ shouldCapture = true, waiting for Windows...');
+
+  setTimeout(() => {
+    if (pendingCapture === res) {
+      console.log('⏰ Capture timeout');
+      pendingCapture = null;
+      shouldCapture  = false;
+      res.json({ status: 'timeout' });
     }
-    if (pendingCapture) {
-        return res.json({ status: 'error', message: 'Busy' });
-    }
-    pendingCapture = res;
-    windowsClient.send(JSON.stringify({ type: 'capture' }));
-    setTimeout(() => {
-        if (pendingCapture) {
-            pendingCapture.json({ status: 'timeout' });
-            pendingCapture = null;
-        }
-    }, 15000);
+  }, 15000);
 });
 
-// Windows: poll for capture command
+// ── Windows: poll for capture command ──
 app.get('/poll', (req, res) => {
-    res.json({
-        status: 'ok',
-        shouldCapture: pendingCapture !== null
-    });
+  const capture = shouldCapture;
+  if (capture) {
+    shouldCapture = false;
+    console.log('🖥️  Windows got capture command');
+  }
+  res.json({ status: 'ok', shouldCapture: capture });
 });
 
-// Windows: submit screenshot via HTTP (for polling mode)
+// ── Windows: submit screenshot ──
 app.post('/screenshot', (req, res) => {
-    const { image } = req.body;
-    if (!image) return res.json({ status: 'error' });
-    console.log('Screenshot received (HTTP)');
-    lastImage = image;
-    if (pendingCapture) {
-        pendingCapture.json({ status: 'ok' });
-        pendingCapture = null;
-    }
-    res.json({ status: 'ok' });
+  const { image } = req.body;
+  if (!image) return res.json({ status: 'error' });
+
+  console.log('📸 Screenshot received (' + Math.round(image.length / 1024) + ' KB)');
+  lastImage = image;
+
+  if (pendingCapture) {
+    console.log('✅ Responding to iPhone: screenshot ok');
+    pendingCapture.json({ status: 'ok' });
+    pendingCapture = null;
+  }
+
+  res.json({ status: 'ok' });
 });
 
-// Admin: save answer
+// ── Admin: save answer ──
 app.post('/answer', (req, res) => {
-    const { answer } = req.body;
-    if (!answer) return res.json({ status: 'error' });
-    lastAnalysis = answer.trim().toLowerCase().charAt(0);
-    analysisVersion++;
-    console.log('Answer saved:', lastAnalysis);
-    res.json({ status: 'ok', answer: lastAnalysis, version: analysisVersion });
+  const { answer } = req.body;
+  if (!answer) return res.json({ status: 'error' });
+
+  lastAnalysis = answer.trim().toLowerCase().charAt(0);
+  analysisVersion++;
+  console.log('📝 Answer saved:', lastAnalysis, 'v' + analysisVersion);
+  res.json({ status: 'ok', answer: lastAnalysis, version: analysisVersion });
 });
 
-// iPhone: get last answer (with version for change detection)
+// ── iPhone: get last answer ──
 app.get('/last', (req, res) => {
-    res.json({ status: 'ok', analysis: lastAnalysis, version: analysisVersion });
+  res.json({ status: 'ok', analysis: lastAnalysis, version: analysisVersion });
 });
 
-// Admin: get last screenshot
+// ── Admin: get last screenshot ──
 app.get('/last-image', (req, res) => {
-    res.json({ status: 'ok', image: lastImage });
+  res.json({ status: 'ok', image: lastImage });
 });
 
-// Health check
+// ── Health check ──
 app.get('/ping', (req, res) => {
-    res.json({ status: 'ok', windows: windowsClient ? 'connected' : 'disconnected' });
+  res.json({ status: 'ok' });
+});
+
+// ── Start ──
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
