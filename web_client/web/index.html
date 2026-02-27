@@ -50,6 +50,7 @@
     }
     #dot.green { background: #4caf50; }
     #wStatus { font-size: 12px; color: #444; }
+    #wHint { font-size: 11px; color: #c62828; max-width: 300px; text-align: center; line-height: 1.5; }
     .btn {
       padding: 12px 38px;
       border: none;
@@ -121,6 +122,7 @@
   <div id="windowScreen">
     <div id="dot"></div>
     <div id="wStatus">Press Start</div>
+    <div id="wHint"></div>
     <button class="btn" id="startBtn">Start</button>
     <button class="btn" id="stopBtn">Stop</button>
   </div>
@@ -161,29 +163,51 @@
       document.getElementById(id).style.display = 'flex';
     }
 
-    // ══════════════════════════
-    // WINDOW MODE - HTTP Polling
-    // ══════════════════════════
+    // ══════════════════════════════════════════
+    // WINDOW MODE - Captures ENTIRE SCREEN
+    // ══════════════════════════════════════════
     let stream = null;
     let pollTimer = null;
     let isCapturing = false;
 
     document.getElementById('startBtn').addEventListener('click', async () => {
       setWStatus('Requesting permission...');
+      document.getElementById('wHint').textContent = '⚠️ IMPORTANT: Choose "Entire Screen" not a tab!';
+
       try {
+        // Request screen capture - preferScreens hints browser to show screen options first
         stream = await navigator.mediaDevices.getDisplayMedia({
-          video: { cursor: 'always' },
-          audio: false
+          video: {
+            cursor: 'always',
+            displaySurface: 'monitor'   // hint: prefer entire screen
+          },
+          audio: false,
+          preferCurrentTab: false        // don't prefer current tab
         });
-        stream.getVideoTracks()[0].addEventListener('ended', () => {
+
+        // Check what was selected
+        const track = stream.getVideoTracks()[0];
+        const settings = track.getSettings();
+        console.log('Capture settings:', settings);
+
+        if (settings.displaySurface === 'browser') {
+          document.getElementById('wHint').textContent =
+            '⚠️ You selected a TAB. This will only capture that tab. Restart and choose "Entire Screen" instead.';
+        } else {
+          document.getElementById('wHint').textContent = '';
+        }
+
+        track.addEventListener('ended', () => {
           stopWindow();
           setWStatus('Stream ended');
         });
+
         setConnected(true);
-        setWStatus('Connected - Polling');
+        setWStatus('Connected - Polling every 1s');
         startPolling();
       } catch (e) {
         setWStatus('Error: ' + e.message);
+        document.getElementById('wHint').textContent = '';
       }
     });
 
@@ -221,6 +245,7 @@
       if (isCapturing) return;
       isCapturing = true;
       setWStatus('Capturing...');
+
       try {
         const track = stream.getVideoTracks()[0];
         if (!track || track.readyState === 'ended') {
@@ -229,18 +254,26 @@
           return;
         }
 
+        // Create video element from the stream
         const video = document.createElement('video');
         video.srcObject = new MediaStream([track]);
         video.muted = true;
         await video.play();
-        await new Promise(r => requestAnimationFrame(r));
+
+        // Wait for frame to be ready
+        await new Promise(r => setTimeout(r, 200));
 
         const canvas = document.createElement('canvas');
         canvas.width  = video.videoWidth  || 1920;
         canvas.height = video.videoHeight || 1080;
         canvas.getContext('2d').drawImage(video, 0, 0);
 
+        // Stop the video element (not the stream!)
+        video.pause();
+        video.srcObject = null;
+
         const imageData = canvas.toDataURL('image/jpeg', 0.7);
+        console.log('Image size:', Math.round(imageData.length / 1024), 'KB');
 
         const res = await fetch(BASE + '/screenshot', {
           method: 'POST',
@@ -249,8 +282,9 @@
         });
         const result = await res.json();
         console.log('Screenshot sent:', result.status);
-        setWStatus('Sent ✓');
+        setWStatus('Sent ✓ (' + new Date().toLocaleTimeString() + ')');
       } catch (e) {
+        console.error('Capture error:', e);
         setWStatus('Error: ' + e.message);
       } finally {
         isCapturing = false;

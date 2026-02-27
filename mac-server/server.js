@@ -30,7 +30,7 @@ app.post('/capture', (req, res) => {
 
   setTimeout(() => {
     if (pendingCapture === res) {
-      console.log('⏰ Capture timeout');
+      console.log('⏰ Capture timeout - Windows did not respond');
       pendingCapture = null;
       shouldCapture  = false;
       res.json({ status: 'timeout' });
@@ -76,7 +76,7 @@ app.post('/answer', (req, res) => {
   res.json({ status: 'ok', answer: lastAnalysis, version: analysisVersion });
 });
 
-// ── iPhone: get last answer ──
+// ── iPhone: get last answer + version ──
 app.get('/last', (req, res) => {
   res.json({ status: 'ok', analysis: lastAnalysis, version: analysisVersion });
 });
@@ -84,6 +84,11 @@ app.get('/last', (req, res) => {
 // ── Admin: get last screenshot ──
 app.get('/last-image', (req, res) => {
   res.json({ status: 'ok', image: lastImage });
+});
+
+// ── iPhone: sync version (to avoid stale local version) ──
+app.get('/sync', (req, res) => {
+  res.json({ status: 'ok', version: analysisVersion });
 });
 
 // ── Health check ──
@@ -95,4 +100,5 @@ app.get('/ping', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Version starts at: ${analysisVersion}`);
 });

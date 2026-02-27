@@ -4,7 +4,7 @@ import MediaPlayer
 import UIKit
 import AudioToolbox
 
-// ⚠️ رابط ngrok - تأكد إنه نفس الرابط الشغال عندك
+// ⚠️ رابط ngrok
 let SERVER_URL = "https://2291-31-206-48-4.ngrok-free.app"
 
 // MARK: - View
@@ -32,11 +32,11 @@ class AppViewModel: ObservableObject {
     private var volumeObserver: NSKeyValueObservation?
     private let session = AVAudioSession.sharedInstance()
 
-    private var isCapturing = false
+    private var isCapturing = false              // ONLY blocks volume UP
     private var ignoreNextVolumeChange = false
 
     private var answerPollTimer: Timer?
-    private var lastKnownVersion: Int = 0
+    private var lastKnownVersion: Int = 0        // synced from server on startup
     private var savedAnswer: String = ""
 
     // MARK: - Setup
@@ -46,21 +46,55 @@ class AppViewModel: ObservableObject {
         setupAudio()
         addHiddenVolumeView()
 
+        // Load local cache
         savedAnswer = UserDefaults.standard.string(forKey: "lastAnswer") ?? ""
-        lastKnownVersion = UserDefaults.standard.integer(forKey: "lastVersion")
 
         print("🔧 Setup done. SERVER_URL = \(SERVER_URL)")
-        print("🔧 Saved answer: \(savedAnswer), version: \(lastKnownVersion)")
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             self.observeVolume()
-            print("🔧 Volume observer started, current volume: \(self.session.outputVolume)")
+            print("🔧 Volume observer started")
         }
 
-        pingServer()
+        // Sync version from server FIRST, then start ping loop
+        syncVersionFromServer()
+
         Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             self?.pingServer()
         }
+    }
+
+    // MARK: - Sync version from server on startup
+    // This prevents the "stale version" bug where local version is behind server
+
+    private func syncVersionFromServer() {
+        guard let url = URL(string: "\(SERVER_URL)/last") else { return }
+
+        var req = URLRequest(url: url)
+        req.setValue("1", forHTTPHeaderField: "ngrok-skip-browser-warning")
+
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
+            guard let self else { return }
+
+            if let data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let version = json["version"] as? Int {
+
+                self.lastKnownVersion = version
+
+                // Also sync the answer if there is one
+                if let answer = json["analysis"] as? String, !answer.isEmpty {
+                    self.savedAnswer = answer.trimmingCharacters(in: .whitespaces).lowercased()
+                    UserDefaults.standard.set(self.savedAnswer, forKey: "lastAnswer")
+                }
+
+                print("🔄 Synced from server: version=\(version), answer='\(self.savedAnswer)'")
+            }
+
+            DispatchQueue.main.async {
+                self.pingServer()
+            }
+        }.resume()
     }
 
     // MARK: - Audio
@@ -83,7 +117,6 @@ class AppViewModel: ObservableObject {
             if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                let window = scene.windows.first {
                 window.addSubview(volumeView)
-                print("🔧 Hidden volume view added")
             }
         }
     }
@@ -98,19 +131,17 @@ class AppViewModel: ObservableObject {
 
             if self.ignoreNextVolumeChange {
                 self.ignoreNextVolumeChange = false
-                print("🔇 Ignored volume reset")
                 return
             }
 
             guard let newVol = change.newValue, let oldVol = change.oldValue else { return }
             let diff = newVol - oldVol
-            print("🔊 Volume changed: \(oldVol) → \(newVol) (diff: \(diff))")
 
             if diff > 0.01 {
-                print("⬆️ Volume UP detected")
+                print("⬆️ Volume UP")
                 self.handleVolumeUp()
             } else if diff < -0.01 {
-                print("⬇️ Volume DOWN detected")
+                print("⬇️ Volume DOWN")
                 self.handleVolumeDown()
             }
 
@@ -139,20 +170,19 @@ class AppViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Volume UP → Capture
+    // MARK: - Volume UP → Capture + Auto-poll for answer
 
     private func handleVolumeUp() {
         guard !isCapturing else {
-            print("⚠️ Already capturing, skipped")
+            print("⚠️ Already capturing, skip")
             return
         }
         isCapturing = true
 
+        // 1 vibration = started
         vibrate(times: 1)
-        print("📱 Sending POST /capture...")
 
         guard let url = URL(string: "\(SERVER_URL)/capture") else {
-            print("❌ Invalid URL")
             isCapturing = false
             return
         }
@@ -166,58 +196,55 @@ class AppViewModel: ObservableObject {
         URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
             guard let self else { return }
 
-            defer {
-                DispatchQueue.main.async { self.isCapturing = false }
-            }
+            // Release capture lock
+            DispatchQueue.main.async { self.isCapturing = false }
 
             if let error {
-                print("❌ Capture network error: \(error.localizedDescription)")
+                print("❌ Capture error: \(error.localizedDescription)")
                 return
             }
 
-            if let httpResponse = response as? HTTPURLResponse {
-                print("📱 Capture HTTP status: \(httpResponse.statusCode)")
-            }
-
-            guard let data else {
-                print("❌ No data received")
+            guard let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                print("❌ Invalid response")
                 return
             }
 
-            if let str = String(data: data, encoding: .utf8) {
-                print("📱 Capture response: \(str)")
-            }
+            let status = json["status"] as? String ?? "unknown"
+            print("📱 Capture response: \(status)")
 
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  json["status"] as? String == "ok" else {
-                print("❌ Capture failed - status not ok")
-                return
+            if status == "ok" {
+                // 2 vibrations = screenshot received
+                DispatchQueue.main.async {
+                    self.vibrate(times: 2)
+                }
+                // Start polling for the admin's answer
+                self.startAnswerPolling()
+            } else if status == "timeout" {
+                print("⏰ Windows didn't capture in time")
+                // 3 short taps = error signal
+                DispatchQueue.main.async {
+                    let gen = UINotificationFeedbackGenerator()
+                    gen.notificationOccurred(.error)
+                }
             }
-
-            print("✅ Screenshot captured successfully!")
-            DispatchQueue.main.async {
-                self.vibrate(times: 2)
-            }
-
-            // Start polling for answer
-            self.startAnswerPolling()
         }.resume()
     }
 
-    // MARK: - Volume DOWN → Replay (local only, NEVER blocked)
+    // MARK: - Volume DOWN → Replay from local (NEVER blocked by isCapturing)
 
     private func handleVolumeDown() {
         let answer = savedAnswer
-        print("🔁 Replaying saved answer: '\(answer)'")
+        print("🔁 Replay: '\(answer)'")
         DispatchQueue.main.async {
             self.vibrateForAnswer(answer)
         }
     }
 
-    // MARK: - Answer Polling
+    // MARK: - Answer Polling (auto-vibrate when admin sends answer)
 
     private func startAnswerPolling() {
-        print("🔄 Starting answer polling...")
+        print("🔄 Polling for answer... (current version: \(lastKnownVersion))")
         DispatchQueue.main.async {
             self.answerPollTimer?.invalidate()
 
@@ -225,10 +252,10 @@ class AppViewModel: ObservableObject {
                 self?.checkForAnswer(timer: timer)
             }
 
-            // Auto-stop after 120s
-            DispatchQueue.main.asyncAfter(deadline: .now() + 120) { [weak self] in
+            // Timeout after 180s
+            DispatchQueue.main.asyncAfter(deadline: .now() + 180) { [weak self] in
                 if self?.answerPollTimer != nil {
-                    print("⏰ Answer polling timeout (120s)")
+                    print("⏰ Answer poll timeout")
                     self?.answerPollTimer?.invalidate()
                     self?.answerPollTimer = nil
                 }
@@ -242,35 +269,33 @@ class AppViewModel: ObservableObject {
         var req = URLRequest(url: url)
         req.setValue("1", forHTTPHeaderField: "ngrok-skip-browser-warning")
 
-        URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             guard let self else { return }
-
-            if let error {
-                print("❌ Poll /last error: \(error.localizedDescription)")
-                return
-            }
-
             guard let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let version = json["version"] as? Int,
                   let answer = json["analysis"] as? String,
                   !answer.isEmpty else { return }
 
+            // New answer detected!
             if version > self.lastKnownVersion {
-                let cleanAnswer = answer.trimmingCharacters(in: .whitespaces).lowercased()
-                print("🎉 New answer! '\(cleanAnswer)' v\(version)")
+                let clean = answer.trimmingCharacters(in: .whitespaces).lowercased()
+                print("🎉 New answer: '\(clean)' v\(version)")
 
                 self.lastKnownVersion = version
-                self.savedAnswer = cleanAnswer
+                self.savedAnswer = clean
 
-                UserDefaults.standard.set(self.savedAnswer, forKey: "lastAnswer")
+                UserDefaults.standard.set(clean, forKey: "lastAnswer")
                 UserDefaults.standard.set(version, forKey: "lastVersion")
 
                 DispatchQueue.main.async {
+                    // Stop polling
                     timer.invalidate()
                     self.answerPollTimer = nil
-                    print("📳 Auto-vibrating for answer: \(cleanAnswer)")
-                    self.vibrateForAnswer(cleanAnswer)
+
+                    // AUTO-VIBRATE immediately!
+                    print("📳 Auto-vibrate: \(clean)")
+                    self.vibrateForAnswer(clean)
                 }
             }
         }.resume()
@@ -285,25 +310,18 @@ class AppViewModel: ObservableObject {
         req.setValue("1", forHTTPHeaderField: "ngrok-skip-browser-warning")
         req.timeoutInterval = 10
 
-        URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
             DispatchQueue.main.async {
                 if let error {
-                    print("❌ Ping failed: \(error.localizedDescription)")
+                    print("❌ Ping: \(error.localizedDescription)")
                     self?.dotColor = .gray.opacity(0.3)
                     return
                 }
-
                 if let data,
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    json["status"] as? String == "ok" {
-                    if self?.dotColor != .green {
-                        print("✅ Ping OK - connected!")
-                    }
                     self?.dotColor = .green
                 } else {
-                    if let data, let str = String(data: data, encoding: .utf8) {
-                        print("⚠️ Ping unexpected response: \(str)")
-                    }
                     self?.dotColor = .gray.opacity(0.3)
                 }
             }
@@ -314,7 +332,6 @@ class AppViewModel: ObservableObject {
 
     private func vibrateForAnswer(_ answer: String) {
         guard !answer.isEmpty else {
-            print("📳 No answer saved, light tap")
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             return
         }
@@ -329,8 +346,8 @@ class AppViewModel: ObservableObject {
         default:  count = 0
         }
 
-        print("📳 Vibrating \(count) times for '\(answer)'")
         guard count > 0 else { return }
+        print("📳 \(count) vibrations for '\(answer)'")
         vibrate(times: count)
     }
 
