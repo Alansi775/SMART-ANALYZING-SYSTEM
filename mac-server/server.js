@@ -1,7 +1,8 @@
 require('dotenv').config();
-const express = require('express');
-const cors    = require('cors');
-const path    = require('path');
+const express   = require('express');
+const WebSocket = require('ws');
+const cors      = require('cors');
+const path      = require('path');
 
 const app = express();
 app.use(cors());
@@ -12,60 +13,114 @@ app.use(express.static(path.join(__dirname, '..', 'web_client', 'web')));
 let lastImage       = null;
 let lastAnalysis    = null;
 let analysisVersion = 0;
-let shouldCapture   = false;
-let pendingCapture  = null;
 
-// ── iPhone: trigger screenshot ──
+// ── WebSocket clients ──
+let windowsWS = null;   // the Windows browser (code "w")
+let iphoneWS  = null;   // the iPhone app
+let pendingCaptureRes = null;  // HTTP response waiting for screenshot
+
+const server = app.listen(process.env.PORT || 3000, () => {
+  console.log(`Server running on port ${server.address().port}`);
+});
+
+const wss = new WebSocket.Server({ server });
+
+wss.on('connection', (ws, req) => {
+  console.log('🔌 New WebSocket connection');
+
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
+  ws.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(raw);
+
+      // ── Register as Windows or iPhone ──
+      if (msg.type === 'register') {
+        if (msg.role === 'windows') {
+          windowsWS = ws;
+          ws._role = 'windows';
+          console.log('🖥️  Windows registered');
+          ws.send(JSON.stringify({ type: 'registered', role: 'windows' }));
+        } else if (msg.role === 'iphone') {
+          iphoneWS = ws;
+          ws._role = 'iphone';
+          console.log('📱 iPhone registered');
+          ws.send(JSON.stringify({
+            type: 'registered',
+            role: 'iphone',
+            version: analysisVersion,
+            analysis: lastAnalysis
+          }));
+        }
+      }
+
+      // ── Windows sends screenshot ──
+      if (msg.type === 'screenshot' && msg.image) {
+        console.log('📸 Screenshot received (' + Math.round(msg.image.length / 1024) + ' KB)');
+        lastImage = msg.image;
+
+        // Respond to pending iPhone HTTP request
+        if (pendingCaptureRes) {
+          pendingCaptureRes.json({ status: 'ok' });
+          pendingCaptureRes = null;
+        }
+      }
+
+    } catch (e) {
+      console.log('WS parse error:', e.message);
+    }
+  });
+
+  ws.on('close', () => {
+    if (ws._role === 'windows') {
+      console.log('🖥️  Windows disconnected');
+      windowsWS = null;
+    } else if (ws._role === 'iphone') {
+      console.log('📱 iPhone disconnected');
+      iphoneWS = null;
+    }
+  });
+});
+
+// ── Heartbeat: keep connections alive ──
+setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (!ws.isAlive) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
+
+// ── iPhone HTTP: trigger screenshot ──
 app.post('/capture', (req, res) => {
   console.log('📱 /capture called');
 
-  if (pendingCapture) {
-    console.log('⚠️  Already pending, rejecting');
+  if (!windowsWS || windowsWS.readyState !== WebSocket.OPEN) {
+    return res.json({ status: 'error', message: 'Windows not connected' });
+  }
+
+  if (pendingCaptureRes) {
     return res.json({ status: 'error', message: 'Busy' });
   }
 
-  shouldCapture  = true;
-  pendingCapture = res;
-  console.log('✅ shouldCapture = true, waiting for Windows...');
+  pendingCaptureRes = res;
 
+  // Tell Windows to capture NOW
+  windowsWS.send(JSON.stringify({ type: 'capture' }));
+  console.log('✅ Sent capture command to Windows');
+
+  // Timeout
   setTimeout(() => {
-    if (pendingCapture === res) {
-      console.log('⏰ Capture timeout - Windows did not respond');
-      pendingCapture = null;
-      shouldCapture  = false;
+    if (pendingCaptureRes === res) {
+      console.log('⏰ Capture timeout');
+      pendingCaptureRes = null;
       res.json({ status: 'timeout' });
     }
   }, 15000);
 });
 
-// ── Windows: poll for capture command ──
-app.get('/poll', (req, res) => {
-  const capture = shouldCapture;
-  if (capture) {
-    shouldCapture = false;
-    console.log('🖥️  Windows got capture command');
-  }
-  res.json({ status: 'ok', shouldCapture: capture });
-});
-
-// ── Windows: submit screenshot ──
-app.post('/screenshot', (req, res) => {
-  const { image } = req.body;
-  if (!image) return res.json({ status: 'error' });
-
-  console.log('📸 Screenshot received (' + Math.round(image.length / 1024) + ' KB)');
-  lastImage = image;
-
-  if (pendingCapture) {
-    console.log('✅ Responding to iPhone: screenshot ok');
-    pendingCapture.json({ status: 'ok' });
-    pendingCapture = null;
-  }
-
-  res.json({ status: 'ok' });
-});
-
-// ── Admin: save answer ──
+// ── Admin: save answer → push to iPhone instantly via WS ──
 app.post('/answer', (req, res) => {
   const { answer } = req.body;
   if (!answer) return res.json({ status: 'error' });
@@ -73,10 +128,21 @@ app.post('/answer', (req, res) => {
   lastAnalysis = answer.trim().toLowerCase().charAt(0);
   analysisVersion++;
   console.log('📝 Answer saved:', lastAnalysis, 'v' + analysisVersion);
+
+  // Push answer to iPhone instantly via WebSocket!
+  if (iphoneWS && iphoneWS.readyState === WebSocket.OPEN) {
+    iphoneWS.send(JSON.stringify({
+      type: 'answer',
+      analysis: lastAnalysis,
+      version: analysisVersion
+    }));
+    console.log('📤 Answer pushed to iPhone via WS');
+  }
+
   res.json({ status: 'ok', answer: lastAnalysis, version: analysisVersion });
 });
 
-// ── iPhone: get last answer + version ──
+// ── iPhone: get last answer (fallback if WS missed it) ──
 app.get('/last', (req, res) => {
   res.json({ status: 'ok', analysis: lastAnalysis, version: analysisVersion });
 });
@@ -86,19 +152,7 @@ app.get('/last-image', (req, res) => {
   res.json({ status: 'ok', image: lastImage });
 });
 
-// ── iPhone: sync version (to avoid stale local version) ──
-app.get('/sync', (req, res) => {
-  res.json({ status: 'ok', version: analysisVersion });
-});
-
 // ── Health check ──
 app.get('/ping', (req, res) => {
-  res.json({ status: 'ok' });
-});
-
-// ── Start ──
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Version starts at: ${analysisVersion}`);
+  res.json({ status: 'ok', windows: windowsWS ? 'connected' : 'disconnected' });
 });

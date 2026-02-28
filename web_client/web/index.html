@@ -15,96 +15,44 @@
       align-items: center;
       justify-content: center;
     }
-    #loginScreen {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 14px;
-    }
+    #loginScreen { display: flex; flex-direction: column; align-items: center; gap: 14px; }
     #loginScreen p { color: #333; font-size: 11px; letter-spacing: 3px; }
     #codeInput {
-      background: #0a0a0a;
-      border: 1px solid #1a1a1a;
-      border-radius: 12px;
-      color: #fff;
-      font-size: 22px;
-      padding: 12px 22px;
-      text-align: center;
-      width: 90px;
-      outline: none;
-      letter-spacing: 8px;
+      background: #0a0a0a; border: 1px solid #1a1a1a; border-radius: 12px;
+      color: #fff; font-size: 22px; padding: 12px 22px; text-align: center;
+      width: 90px; outline: none; letter-spacing: 8px;
     }
     #loginError { color: #e53935; font-size: 11px; min-height: 14px; }
 
-    #windowScreen {
-      display: none;
-      flex-direction: column;
-      align-items: center;
-      gap: 18px;
-    }
-    #dot {
-      width: 10px; height: 10px;
-      border-radius: 50%;
-      background: #222;
-      transition: background 0.3s;
-    }
+    #windowScreen { display: none; flex-direction: column; align-items: center; gap: 18px; }
+    #dot { width: 10px; height: 10px; border-radius: 50%; background: #222; transition: background 0.3s; }
     #dot.green { background: #4caf50; }
     #wStatus { font-size: 12px; color: #444; }
     #wHint { font-size: 11px; color: #c62828; max-width: 300px; text-align: center; line-height: 1.5; }
-    .btn {
-      padding: 12px 38px;
-      border: none;
-      border-radius: 22px;
-      font-size: 14px;
-      cursor: pointer;
-      transition: opacity 0.2s;
-    }
+    .btn { padding: 12px 38px; border: none; border-radius: 22px; font-size: 14px; cursor: pointer; }
     .btn:active { opacity: 0.7; }
     #startBtn { background: #fff; color: #000; }
     #stopBtn  { background: #c62828; color: #fff; display: none; }
 
     #adminScreen {
-      display: none;
-      flex-direction: column;
-      align-items: center;
-      width: 100vw;
-      min-height: 100vh;
-      padding: 20px 14px 40px;
-      gap: 16px;
-      overflow-y: auto;
+      display: none; flex-direction: column; align-items: center;
+      width: 100vw; min-height: 100vh; padding: 20px 14px 40px; gap: 16px; overflow-y: auto;
     }
     #adminLabel { color: #2e7d32; font-size: 10px; letter-spacing: 4px; }
     #noImage { color: #222; font-size: 13px; margin-top: 20px; }
     #screenshot {
-      max-width: 96vw;
-      max-height: 55vh;
-      border-radius: 10px;
-      border: 1px solid #111;
-      display: none;
-      object-fit: contain;
+      max-width: 96vw; max-height: 55vh; border-radius: 10px;
+      border: 1px solid #111; display: none; object-fit: contain;
     }
     #answerRow { display: flex; gap: 10px; align-items: center; margin-top: 4px; }
     #answerInput {
-      background: #0a0a0a;
-      border: 1px solid #222;
-      border-radius: 10px;
-      color: #fff;
-      font-size: 24px;
-      padding: 10px 16px;
-      text-align: center;
-      width: 70px;
-      outline: none;
-      text-transform: uppercase;
+      background: #0a0a0a; border: 1px solid #222; border-radius: 10px;
+      color: #fff; font-size: 24px; padding: 10px 16px; text-align: center;
+      width: 70px; outline: none; text-transform: uppercase;
     }
     #sendBtn {
-      background: #2e7d32;
-      color: #fff;
-      padding: 11px 24px;
-      border: none;
-      border-radius: 10px;
-      font-size: 14px;
-      font-weight: bold;
-      cursor: pointer;
+      background: #2e7d32; color: #fff; padding: 11px 24px; border: none;
+      border-radius: 10px; font-size: 14px; font-weight: bold; cursor: pointer;
     }
     #sendBtn:active { opacity: 0.7; }
     #confirm { color: #4caf50; font-size: 14px; font-weight: bold; min-height: 18px; }
@@ -140,22 +88,17 @@
   </div>
 
   <script>
-    const BASE = location.protocol + '//' + location.host;
+    const BASE    = location.protocol + '//' + location.host;
+    const WS_URL  = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host;
     const HEADERS = { 'ngrok-skip-browser-warning': '1', 'Content-Type': 'application/json' };
 
     // ── LOGIN ──
     document.getElementById('codeInput').addEventListener('keydown', function(e) {
       if (e.key !== 'Enter') return;
       const code = this.value.trim().toLowerCase();
-      if (code === 'w') {
-        switchTo('windowScreen');
-      } else if (code === 'a') {
-        switchTo('adminScreen');
-        startAdmin();
-      } else {
-        document.getElementById('loginError').textContent = 'invalid code';
-        this.value = '';
-      }
+      if (code === 'w') { switchTo('windowScreen'); }
+      else if (code === 'a') { switchTo('adminScreen'); startAdmin(); }
+      else { document.getElementById('loginError').textContent = 'invalid code'; this.value = ''; }
     });
 
     function switchTo(id) {
@@ -163,82 +106,79 @@
       document.getElementById(id).style.display = 'flex';
     }
 
-    // ══════════════════════════════════════════
-    // WINDOW MODE - Captures ENTIRE SCREEN
-    // ══════════════════════════════════════════
+    // ══════════════════════════════════════════════
+    // WINDOW MODE — WebSocket (instant capture)
+    // ══════════════════════════════════════════════
     let stream = null;
-    let pollTimer = null;
+    let ws = null;
     let isCapturing = false;
 
     document.getElementById('startBtn').addEventListener('click', async () => {
-      setWStatus('Requesting permission...');
-      document.getElementById('wHint').textContent = '⚠️ IMPORTANT: Choose "Entire Screen" not a tab!';
+      setWStatus('Requesting screen permission...');
+      document.getElementById('wHint').textContent = '⚠️ Choose "Entire Screen" not a tab!';
 
       try {
-        // Request screen capture - preferScreens hints browser to show screen options first
         stream = await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            cursor: 'always',
-            displaySurface: 'monitor'   // hint: prefer entire screen
-          },
+          video: { cursor: 'always', displaySurface: 'monitor' },
           audio: false,
-          preferCurrentTab: false        // don't prefer current tab
+          preferCurrentTab: false
         });
 
-        // Check what was selected
         const track = stream.getVideoTracks()[0];
         const settings = track.getSettings();
-        console.log('Capture settings:', settings);
 
         if (settings.displaySurface === 'browser') {
-          document.getElementById('wHint').textContent =
-            '⚠️ You selected a TAB. This will only capture that tab. Restart and choose "Entire Screen" instead.';
+          document.getElementById('wHint').textContent = '⚠️ You chose a TAB. Restart and pick "Entire Screen".';
         } else {
           document.getElementById('wHint').textContent = '';
         }
 
-        track.addEventListener('ended', () => {
-          stopWindow();
-          setWStatus('Stream ended');
-        });
+        track.addEventListener('ended', () => { stopWindow(); setWStatus('Stream ended'); });
 
-        setConnected(true);
-        setWStatus('Connected - Polling every 1s');
-        startPolling();
+        // Connect WebSocket
+        connectWindowsWS();
       } catch (e) {
         setWStatus('Error: ' + e.message);
         document.getElementById('wHint').textContent = '';
       }
     });
 
+    function connectWindowsWS() {
+      setWStatus('Connecting...');
+      ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ type: 'register', role: 'windows' }));
+        setConnected(true);
+        setWStatus('Connected ✓');
+      };
+
+      ws.onmessage = async (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'capture') {
+          await doCapture();
+        }
+      };
+
+      ws.onclose = () => {
+        setConnected(false);
+        setWStatus('Disconnected');
+        // Auto-reconnect if stream still active
+        if (stream && stream.getVideoTracks()[0]?.readyState === 'live') {
+          setTimeout(connectWindowsWS, 3000);
+        }
+      };
+
+      ws.onerror = () => { setWStatus('Connection error'); };
+    }
+
     document.getElementById('stopBtn').addEventListener('click', stopWindow);
 
     function stopWindow() {
-      if (stream) {
-        stream.getTracks().forEach(t => t.stop());
-        stream = null;
-      }
-      if (pollTimer) {
-        clearInterval(pollTimer);
-        pollTimer = null;
-      }
+      if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+      if (ws) { ws.close(); ws = null; }
       setConnected(false);
       setWStatus('Stopped');
-    }
-
-    function startPolling() {
-      pollTimer = setInterval(async () => {
-        if (isCapturing) return;
-        try {
-          const res = await fetch(BASE + '/poll', { headers: HEADERS });
-          const data = await res.json();
-          if (data.shouldCapture) {
-            await doCapture();
-          }
-        } catch (e) {
-          console.log('Poll error:', e);
-        }
-      }, 1000);
     }
 
     async function doCapture() {
@@ -249,42 +189,30 @@
       try {
         const track = stream.getVideoTracks()[0];
         if (!track || track.readyState === 'ended') {
-          setWStatus('Stream ended - click Start again');
+          setWStatus('Stream ended');
           isCapturing = false;
           return;
         }
 
-        // Create video element from the stream
         const video = document.createElement('video');
         video.srcObject = new MediaStream([track]);
         video.muted = true;
         await video.play();
-
-        // Wait for frame to be ready
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 150));
 
         const canvas = document.createElement('canvas');
         canvas.width  = video.videoWidth  || 1920;
         canvas.height = video.videoHeight || 1080;
         canvas.getContext('2d').drawImage(video, 0, 0);
-
-        // Stop the video element (not the stream!)
         video.pause();
         video.srcObject = null;
 
         const imageData = canvas.toDataURL('image/jpeg', 0.7);
-        console.log('Image size:', Math.round(imageData.length / 1024), 'KB');
 
-        const res = await fetch(BASE + '/screenshot', {
-          method: 'POST',
-          headers: HEADERS,
-          body: JSON.stringify({ image: imageData })
-        });
-        const result = await res.json();
-        console.log('Screenshot sent:', result.status);
+        // Send screenshot via WebSocket (fast!)
+        ws.send(JSON.stringify({ type: 'screenshot', image: imageData }));
         setWStatus('Sent ✓ (' + new Date().toLocaleTimeString() + ')');
       } catch (e) {
-        console.error('Capture error:', e);
         setWStatus('Error: ' + e.message);
       } finally {
         isCapturing = false;
@@ -296,13 +224,10 @@
       document.getElementById('startBtn').style.display = val ? 'none' : 'block';
       document.getElementById('stopBtn').style.display  = val ? 'block' : 'none';
     }
-
-    function setWStatus(msg) {
-      document.getElementById('wStatus').textContent = msg;
-    }
+    function setWStatus(msg) { document.getElementById('wStatus').textContent = msg; }
 
     // ══════════════════════════
-    // ADMIN MODE
+    // ADMIN MODE (HTTP polling)
     // ══════════════════════════
     let lastSrc = null;
 
@@ -318,20 +243,16 @@
         const data = await res.json();
         if (data.image && data.image !== lastSrc) {
           lastSrc = data.image;
-          const img = document.getElementById('screenshot');
-          img.src = data.image;
-          img.style.display = 'block';
+          document.getElementById('screenshot').src = data.image;
+          document.getElementById('screenshot').style.display = 'block';
           document.getElementById('noImage').style.display = 'none';
-          document.getElementById('adminTime').textContent =
-            'Last update: ' + new Date().toLocaleTimeString();
+          document.getElementById('adminTime').textContent = 'Last update: ' + new Date().toLocaleTimeString();
           document.getElementById('answerInput').focus();
         }
       } catch (_) {}
     }
 
-    document.getElementById('answerInput').addEventListener('keydown', e => {
-      if (e.key === 'Enter') sendAnswer();
-    });
+    document.getElementById('answerInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendAnswer(); });
     document.getElementById('sendBtn').addEventListener('click', sendAnswer);
 
     async function sendAnswer() {
@@ -339,17 +260,14 @@
       if (!val) return;
       try {
         const res = await fetch(BASE + '/answer', {
-          method: 'POST',
-          headers: HEADERS,
+          method: 'POST', headers: HEADERS,
           body: JSON.stringify({ answer: val })
         });
         const data = await res.json();
         if (data.status === 'ok') {
           document.getElementById('confirm').textContent = '✓  ' + data.answer.toUpperCase();
           document.getElementById('answerInput').value = '';
-          setTimeout(() => {
-            document.getElementById('confirm').textContent = '';
-          }, 2500);
+          setTimeout(() => { document.getElementById('confirm').textContent = ''; }, 2500);
         }
       } catch (_) {}
     }

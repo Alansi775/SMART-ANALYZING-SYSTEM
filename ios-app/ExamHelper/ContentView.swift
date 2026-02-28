@@ -4,8 +4,8 @@ import MediaPlayer
 import UIKit
 import AudioToolbox
 
-// ⚠️ رابط ngrok
-let SERVER_URL = "https://2291-31-206-48-4.ngrok-free.app"
+// ⚠️ رابط ngrok — بدون مسافة في النهاية!
+let SERVER_URL = "https://0472-31-206-48-4.ngrok-free.app"
 
 // MARK: - View
 
@@ -32,11 +32,17 @@ class AppViewModel: ObservableObject {
     private var volumeObserver: NSKeyValueObservation?
     private let session = AVAudioSession.sharedInstance()
 
-    private var isCapturing = false              // ONLY blocks volume UP
+    // Separate flags — volume DOWN is NEVER blocked
+    private var isCapturing = false
     private var ignoreNextVolumeChange = false
 
-    private var answerPollTimer: Timer?
-    private var lastKnownVersion: Int = 0        // synced from server on startup
+    // WebSocket
+    private var wsTask: URLSessionWebSocketTask?
+    private var wsConnected = false
+    private var shouldReconnect = true
+
+    // Answer state
+    private var lastKnownVersion: Int = 0
     private var savedAnswer: String = ""
 
     // MARK: - Setup
@@ -49,52 +55,150 @@ class AppViewModel: ObservableObject {
         // Load local cache
         savedAnswer = UserDefaults.standard.string(forKey: "lastAnswer") ?? ""
 
-        print("🔧 Setup done. SERVER_URL = \(SERVER_URL)")
+        print("🔧 SERVER_URL = \(SERVER_URL)")
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             self.observeVolume()
-            print("🔧 Volume observer started")
         }
 
-        // Sync version from server FIRST, then start ping loop
-        syncVersionFromServer()
+        // Connect WebSocket
+        connectWebSocket()
 
-        Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
-            self?.pingServer()
+        // Ping every 30s to keep connection alive
+        Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            self?.sendWSPing()
         }
     }
 
-    // MARK: - Sync version from server on startup
-    // This prevents the "stale version" bug where local version is behind server
+    // MARK: - WebSocket Connection
 
-    private func syncVersionFromServer() {
-        guard let url = URL(string: "\(SERVER_URL)/last") else { return }
+    private func connectWebSocket() {
+        guard shouldReconnect else { return }
 
-        var req = URLRequest(url: url)
-        req.setValue("1", forHTTPHeaderField: "ngrok-skip-browser-warning")
+        let wsURL = SERVER_URL
+            .replacingOccurrences(of: "https://", with: "wss://")
+            .replacingOccurrences(of: "http://", with: "ws://")
 
-        URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
+        guard let url = URL(string: wsURL) else {
+            print("❌ Invalid WS URL")
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("1", forHTTPHeaderField: "ngrok-skip-browser-warning")
+
+        let session = URLSession(configuration: .default)
+        wsTask = session.webSocketTask(with: request)
+        wsTask?.resume()
+
+        // Register as iPhone
+        let registerMsg = ["type": "register", "role": "iphone"]
+        if let data = try? JSONSerialization.data(withJSONObject: registerMsg) {
+            wsTask?.send(.string(String(data: data, encoding: .utf8)!)) { error in
+                if let error {
+                    print("❌ WS register error: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        // Start receiving
+        receiveWSMessage()
+
+        print("🔌 WebSocket connecting...")
+    }
+
+    private func receiveWSMessage() {
+        wsTask?.receive { [weak self] result in
             guard let self else { return }
 
-            if let data,
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let version = json["version"] as? Int {
-
-                self.lastKnownVersion = version
-
-                // Also sync the answer if there is one
-                if let answer = json["analysis"] as? String, !answer.isEmpty {
-                    self.savedAnswer = answer.trimmingCharacters(in: .whitespaces).lowercased()
-                    UserDefaults.standard.set(self.savedAnswer, forKey: "lastAnswer")
+            switch result {
+            case .success(let message):
+                switch message {
+                case .string(let text):
+                    self.handleWSMessage(text)
+                default:
+                    break
                 }
+                // Continue receiving
+                self.receiveWSMessage()
 
-                print("🔄 Synced from server: version=\(version), answer='\(self.savedAnswer)'")
+            case .failure(let error):
+                print("❌ WS receive error: \(error.localizedDescription)")
+                DispatchQueue.main.async {
+                    self.wsConnected = false
+                    self.dotColor = .gray.opacity(0.3)
+                }
+                // Reconnect after delay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    self.connectWebSocket()
+                }
+            }
+        }
+    }
+
+    private func handleWSMessage(_ text: String) {
+        guard let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = json["type"] as? String else { return }
+
+        if type == "registered" {
+            // Connected! Sync version from server
+            if let version = json["version"] as? Int {
+                lastKnownVersion = version
+            }
+            if let answer = json["analysis"] as? String, !answer.isEmpty {
+                savedAnswer = answer.trimmingCharacters(in: .whitespaces).lowercased()
+                UserDefaults.standard.set(savedAnswer, forKey: "lastAnswer")
             }
 
             DispatchQueue.main.async {
-                self.pingServer()
+                self.wsConnected = true
+                self.dotColor = .green
+                print("✅ WebSocket connected! version=\(self.lastKnownVersion) answer='\(self.savedAnswer)'")
             }
-        }.resume()
+        }
+
+        if type == "answer" {
+            // 🎉 Answer pushed from server INSTANTLY!
+            guard let answer = json["analysis"] as? String,
+                  let version = json["version"] as? Int,
+                  !answer.isEmpty else { return }
+
+            let clean = answer.trimmingCharacters(in: .whitespaces).lowercased()
+            print("🎉 Answer received via WS: '\(clean)' v\(version)")
+
+            lastKnownVersion = version
+            savedAnswer = clean
+            UserDefaults.standard.set(clean, forKey: "lastAnswer")
+            UserDefaults.standard.set(version, forKey: "lastVersion")
+
+            // AUTO-VIBRATE immediately!
+            DispatchQueue.main.async {
+                print("📳 Auto-vibrate: \(clean)")
+                self.vibrateForAnswer(clean)
+            }
+        }
+    }
+
+    private func sendWSPing() {
+        wsTask?.sendPing { [weak self] error in
+            if let error {
+                print("❌ WS ping failed: \(error.localizedDescription)")
+                DispatchQueue.main.async {
+                    self?.wsConnected = false
+                    self?.dotColor = .gray.opacity(0.3)
+                }
+                // Reconnect
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    self?.connectWebSocket()
+                }
+            } else {
+                DispatchQueue.main.async {
+                    self?.wsConnected = true
+                    self?.dotColor = .green
+                }
+            }
+        }
     }
 
     // MARK: - Audio
@@ -104,7 +208,6 @@ class AppViewModel: ObservableObject {
             try session.setCategory(.playback, options: .mixWithOthers)
             try session.setActive(true)
             previousVolume = session.outputVolume
-            print("🔊 Audio setup OK, volume: \(previousVolume)")
         } catch {
             print("❌ Audio error: \(error)")
         }
@@ -170,11 +273,11 @@ class AppViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Volume UP → Capture + Auto-poll for answer
+    // MARK: - Volume UP → Capture (HTTP POST, background thread)
 
     private func handleVolumeUp() {
         guard !isCapturing else {
-            print("⚠️ Already capturing, skip")
+            print("⚠️ Already capturing")
             return
         }
         isCapturing = true
@@ -182,6 +285,7 @@ class AppViewModel: ObservableObject {
         // 1 vibration = started
         vibrate(times: 1)
 
+        // Use HTTP for capture (reliable, handles timeout)
         guard let url = URL(string: "\(SERVER_URL)/capture") else {
             isCapturing = false
             return
@@ -193,10 +297,9 @@ class AppViewModel: ObservableObject {
         req.setValue("1", forHTTPHeaderField: "ngrok-skip-browser-warning")
         req.timeoutInterval = 20
 
-        URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
             guard let self else { return }
 
-            // Release capture lock
             DispatchQueue.main.async { self.isCapturing = false }
 
             if let error {
@@ -205,127 +308,30 @@ class AppViewModel: ObservableObject {
             }
 
             guard let data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                print("❌ Invalid response")
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  json["status"] as? String == "ok" else {
+                if let data, let s = String(data: data, encoding: .utf8) {
+                    print("❌ Capture response: \(s)")
+                }
                 return
             }
 
-            let status = json["status"] as? String ?? "unknown"
-            print("📱 Capture response: \(status)")
+            print("✅ Screenshot captured!")
+            DispatchQueue.main.async { self.vibrate(times: 2) }
 
-            if status == "ok" {
-                // 2 vibrations = screenshot received
-                DispatchQueue.main.async {
-                    self.vibrate(times: 2)
-                }
-                // Start polling for the admin's answer
-                self.startAnswerPolling()
-            } else if status == "timeout" {
-                print("⏰ Windows didn't capture in time")
-                // 3 short taps = error signal
-                DispatchQueue.main.async {
-                    let gen = UINotificationFeedbackGenerator()
-                    gen.notificationOccurred(.error)
-                }
-            }
+            // Answer will arrive automatically via WebSocket — no polling needed!
         }.resume()
     }
 
-    // MARK: - Volume DOWN → Replay from local (NEVER blocked by isCapturing)
+    // MARK: - Volume DOWN → Replay (local only, NEVER blocked)
 
     private func handleVolumeDown() {
+        // This is completely independent of isCapturing
         let answer = savedAnswer
         print("🔁 Replay: '\(answer)'")
         DispatchQueue.main.async {
             self.vibrateForAnswer(answer)
         }
-    }
-
-    // MARK: - Answer Polling (auto-vibrate when admin sends answer)
-
-    private func startAnswerPolling() {
-        print("🔄 Polling for answer... (current version: \(lastKnownVersion))")
-        DispatchQueue.main.async {
-            self.answerPollTimer?.invalidate()
-
-            self.answerPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
-                self?.checkForAnswer(timer: timer)
-            }
-
-            // Timeout after 180s
-            DispatchQueue.main.asyncAfter(deadline: .now() + 180) { [weak self] in
-                if self?.answerPollTimer != nil {
-                    print("⏰ Answer poll timeout")
-                    self?.answerPollTimer?.invalidate()
-                    self?.answerPollTimer = nil
-                }
-            }
-        }
-    }
-
-    private func checkForAnswer(timer: Timer) {
-        guard let url = URL(string: "\(SERVER_URL)/last") else { return }
-
-        var req = URLRequest(url: url)
-        req.setValue("1", forHTTPHeaderField: "ngrok-skip-browser-warning")
-
-        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-            guard let self else { return }
-            guard let data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let version = json["version"] as? Int,
-                  let answer = json["analysis"] as? String,
-                  !answer.isEmpty else { return }
-
-            // New answer detected!
-            if version > self.lastKnownVersion {
-                let clean = answer.trimmingCharacters(in: .whitespaces).lowercased()
-                print("🎉 New answer: '\(clean)' v\(version)")
-
-                self.lastKnownVersion = version
-                self.savedAnswer = clean
-
-                UserDefaults.standard.set(clean, forKey: "lastAnswer")
-                UserDefaults.standard.set(version, forKey: "lastVersion")
-
-                DispatchQueue.main.async {
-                    // Stop polling
-                    timer.invalidate()
-                    self.answerPollTimer = nil
-
-                    // AUTO-VIBRATE immediately!
-                    print("📳 Auto-vibrate: \(clean)")
-                    self.vibrateForAnswer(clean)
-                }
-            }
-        }.resume()
-    }
-
-    // MARK: - Ping
-
-    private func pingServer() {
-        guard let url = URL(string: "\(SERVER_URL)/ping") else { return }
-
-        var req = URLRequest(url: url)
-        req.setValue("1", forHTTPHeaderField: "ngrok-skip-browser-warning")
-        req.timeoutInterval = 10
-
-        URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
-            DispatchQueue.main.async {
-                if let error {
-                    print("❌ Ping: \(error.localizedDescription)")
-                    self?.dotColor = .gray.opacity(0.3)
-                    return
-                }
-                if let data,
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   json["status"] as? String == "ok" {
-                    self?.dotColor = .green
-                } else {
-                    self?.dotColor = .gray.opacity(0.3)
-                }
-            }
-        }.resume()
     }
 
     // MARK: - Haptics
