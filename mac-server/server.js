@@ -52,6 +52,10 @@ wss.on('connection', (ws, req) => {
             version: analysisVersion,
             analysis: lastAnalysis
           }));
+        } else if (msg.role === 'admin') {
+          ws._role = 'admin';
+          console.log('👨‍💼 Admin registered');
+          ws.send(JSON.stringify({ type: 'registered', role: 'admin' }));
         }
       }
 
@@ -83,25 +87,34 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-// ── Heartbeat: keep connections alive ──
+// ── Heartbeat: keep connections alive (every 15 seconds) ──
 setInterval(() => {
   wss.clients.forEach((ws) => {
-    if (!ws.isAlive) return ws.terminate();
+    if (!ws.isAlive) {
+      console.log('❌ Connection dead - terminating');
+      return ws.terminate();
+    }
     ws.isAlive = false;
     ws.ping();
   });
-}, 30000);
+}, 15000);
 
-// ── iPhone HTTP: trigger screenshot ──
+// ── Admin/iPhone HTTP: trigger screenshot and notify iPhone ──
 app.post('/capture', (req, res) => {
   console.log('📱 /capture called');
 
+  // Notify iPhone that capture happened (just vibrate)
+  if (iphoneWS && iphoneWS.readyState === WebSocket.OPEN) {
+    iphoneWS.send(JSON.stringify({ type: 'admin_captured' }));
+    console.log('📳 Sent vibrate notification to iPhone');
+  }
+
   if (!windowsWS || windowsWS.readyState !== WebSocket.OPEN) {
-    return res.json({ status: 'error', message: 'Windows not connected' });
+    return res.json({ status: 'ok' });
   }
 
   if (pendingCaptureRes) {
-    return res.json({ status: 'error', message: 'Busy' });
+    return res.json({ status: 'ok' });
   }
 
   pendingCaptureRes = res;
@@ -115,7 +128,7 @@ app.post('/capture', (req, res) => {
     if (pendingCaptureRes === res) {
       console.log('⏰ Capture timeout');
       pendingCaptureRes = null;
-      res.json({ status: 'timeout' });
+      res.json({ status: 'ok' });
     }
   }, 15000);
 });

@@ -5,7 +5,7 @@ import UIKit
 import AudioToolbox
 
 // ⚠️ رابط ngrok — بدون مسافة في النهاية!
-let SERVER_URL = "https://0472-31-206-48-4.ngrok-free.app"
+let SERVER_URL = "https://05c7-45-156-31-150.ngrok-free.app"
 
 // MARK: - View
 
@@ -26,7 +26,7 @@ struct ContentView: View {
 // MARK: - ViewModel
 
 class AppViewModel: ObservableObject {
-    @Published var dotColor: Color = .gray.opacity(0.3)
+    @Published var dotColor: Color = .clear
 
     private var previousVolume: Float = 0.5
     private var volumeObserver: NSKeyValueObservation?
@@ -40,6 +40,8 @@ class AppViewModel: ObservableObject {
     private var wsTask: URLSessionWebSocketTask?
     private var wsConnected = false
     private var shouldReconnect = true
+    private var reconnectAttempts = 0
+    private var maxReconnectAttempts = 120 // 30 minutes of retrying
 
     // Answer state
     private var lastKnownVersion: Int = 0
@@ -64,8 +66,8 @@ class AppViewModel: ObservableObject {
         // Connect WebSocket
         connectWebSocket()
 
-        // Ping every 30s to keep connection alive
-        Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        // Ping every 15s to keep connection alive (same as server)
+        Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             self?.sendWSPing()
         }
     }
@@ -127,10 +129,21 @@ class AppViewModel: ObservableObject {
                 DispatchQueue.main.async {
                     self.wsConnected = false
                     self.dotColor = .gray.opacity(0.3)
+                    
+                    // Hide gray dot after 2 seconds
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        self.dotColor = .clear
+                    }
                 }
-                // Reconnect after delay
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                    self.connectWebSocket()
+                // Aggressive reconnect
+                if self.reconnectAttempts < self.maxReconnectAttempts {
+                    self.reconnectAttempts += 1
+                    print("🔄 Reconnecting... attempt \(self.reconnectAttempts)")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        self.connectWebSocket()
+                    }
+                } else {
+                    print("❌ Max reconnect attempts reached")
                 }
             }
         }
@@ -153,6 +166,7 @@ class AppViewModel: ObservableObject {
 
             DispatchQueue.main.async {
                 self.wsConnected = true
+                self.reconnectAttempts = 0
                 self.dotColor = .green
                 print("✅ WebSocket connected! version=\(self.lastKnownVersion) answer='\(self.savedAnswer)'")
             }
@@ -178,24 +192,44 @@ class AppViewModel: ObservableObject {
                 self.vibrateForAnswer(clean)
             }
         }
+
+        if type == "admin_captured" {
+            // Admin captured screenshot - special haptic feedback
+            print("📱 Admin captured - haptic feedback")
+            DispatchQueue.main.async {
+                self.adminCapturedFeedback()
+            }
+        }
     }
 
     private func sendWSPing() {
         wsTask?.sendPing { [weak self] error in
             if let error {
                 print("❌ WS ping failed: \(error.localizedDescription)")
+                guard let self = self else { return }
+                
                 DispatchQueue.main.async {
-                    self?.wsConnected = false
-                    self?.dotColor = .gray.opacity(0.3)
+                    self.wsConnected = false
+                    self.dotColor = .gray.opacity(0.3)
+                    
+                    // Hide gray dot after 2 seconds
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        self.dotColor = .clear
+                    }
                 }
-                // Reconnect
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                    self?.connectWebSocket()
+                
+                // Aggressive reconnect on ping failure
+                if self.reconnectAttempts < self.maxReconnectAttempts {
+                    self.reconnectAttempts += 1
+                    print("🔄 Reconnecting after ping failure... attempt \(self.reconnectAttempts)")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        self.connectWebSocket()
+                    }
                 }
             } else {
+                // Ping successful - keep connected
                 DispatchQueue.main.async {
                     self?.wsConnected = true
-                    self?.dotColor = .green
                 }
             }
         }
@@ -295,7 +329,7 @@ class AppViewModel: ObservableObject {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("1", forHTTPHeaderField: "ngrok-skip-browser-warning")
-        req.timeoutInterval = 20
+        req.timeoutInterval = 30
 
         URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
             guard let self else { return }
@@ -336,6 +370,16 @@ class AppViewModel: ObservableObject {
 
     // MARK: - Haptics
 
+    private func adminCapturedFeedback() {
+        // Special haptic for admin capture - distinctly different
+        AudioServicesPlaySystemSound(1519)
+        
+        // Additional haptic for distinction
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            AudioServicesPlaySystemSound(1519)
+        }
+    }
+
     private func vibrateForAnswer(_ answer: String) {
         guard !answer.isEmpty else {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -353,8 +397,16 @@ class AppViewModel: ObservableObject {
         }
 
         guard count > 0 else { return }
-        print("📳 \(count) vibrations for '\(answer)'")
-        vibrate(times: count)
+        print("📳 \(count) strong haptic pulses for '\(answer)'")
+        strongHapticPulses(times: count)
+    }
+
+    private func strongHapticPulses(times: Int) {
+        for i in 0..<times {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 1.0) {
+                AudioServicesPlaySystemSound(1519)
+            }
+        }
     }
 
     private func vibrate(times: Int) {
