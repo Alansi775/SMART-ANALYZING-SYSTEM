@@ -4,8 +4,10 @@ import MediaPlayer
 import UIKit
 import AudioToolbox
 
+// in order to run the system open any terminal on this mac and run the command: ngrok http 3000
+// then copy the https url provided by ngrok and paste it in the SERVER_URL constant below
 // ⚠️ رابط ngrok — بدون مسافة في النهاية!
-let SERVER_URL = "https://05c7-45-156-31-150.ngrok-free.app"
+let SERVER_URL = "https://977f-31-206-48-4.ngrok-free.app"
 
 // MARK: - View
 
@@ -316,8 +318,8 @@ class AppViewModel: ObservableObject {
         }
         isCapturing = true
 
-        // 1 vibration = started
-        vibrate(times: 1)
+        // Distinct capture feedback - rapid double pulses
+        captureScreenFeedback()
 
         // Use HTTP for capture (reliable, handles timeout)
         guard let url = URL(string: "\(SERVER_URL)/capture") else {
@@ -370,6 +372,22 @@ class AppViewModel: ObservableObject {
 
     // MARK: - Haptics
 
+    private func captureScreenFeedback() {
+        // Distinctive capture feedback - quick triple pulses to differentiate from answers
+        let generator = UIImpactFeedbackGenerator(style: .heavy)
+        DispatchQueue.main.async {
+            generator.prepare()
+            // Triple quick pulses for "screenshot captured"
+            generator.impactOccurred()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                generator.impactOccurred()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) {
+                generator.impactOccurred()
+            }
+        }
+    }
+
     private func adminCapturedFeedback() {
         // Special haptic for admin capture - distinctly different
         AudioServicesPlaySystemSound(1519)
@@ -402,9 +420,14 @@ class AppViewModel: ObservableObject {
     }
 
     private func strongHapticPulses(times: Int) {
-        for i in 0..<times {
-            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 1.0) {
-                AudioServicesPlaySystemSound(1519)
+        let generator = UIImpactFeedbackGenerator(style: .heavy)
+        DispatchQueue.main.async {
+            generator.prepare()
+            for i in 0..<times {
+                // Each pulse is STRONG and SINGLE, with 1.2s gap for easy counting
+                DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 1.2) {
+                    generator.impactOccurred()
+                }
             }
         }
     }
